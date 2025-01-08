@@ -143,12 +143,17 @@ def recommend():
 
         logger.info(f"Request received - User: {user_id}, Categories: {categories}, Days: {days}")
 
+        # Validate input data
         if not all([user_id, categories, days]):
             return jsonify({
                 "error": "Missing required parameters",
                 "required": ["user_id", "category", "days"],
                 "received": data
             }), 400
+        if not isinstance(categories, list):
+            return jsonify({"error": "Categories must be a list"}), 400
+        if not isinstance(days, int) or days <= 0:
+            return jsonify({"error": "Days must be a positive integer"}), 400
 
         # Connect to MongoDB
         client = connect_to_mongodb()
@@ -156,6 +161,19 @@ def recommend():
 
         # Get destinations by category
         destinations_by_category = get_destinations_by_category(db, categories)
+        logger.info(f"Fetched destinations by category: {destinations_by_category}")
+
+        # Check if destinations are available
+        if not destinations_by_category:
+            logger.warning("No destinations found for the selected categories")
+            return jsonify({"error": "No destinations available for the selected categories"}), 404
+
+        # Check if there are enough destinations
+        total_destinations = sum(len(dests) for dests in destinations_by_category.values())
+        spots_per_day = 5
+        if total_destinations < days * spots_per_day:
+            logger.warning(f"Insufficient destinations: {total_destinations} available, {days * spots_per_day} required")
+            return jsonify({"error": "Insufficient destinations for the selected categories and days"}), 400
 
         # If user has no history, distribute destinations evenly
         if not list(db.saved_destinations.find({"user_id": user_id})):
@@ -174,9 +192,7 @@ def recommend():
             all_destinations.extend(cat_dests)
 
         places = pd.DataFrame(all_destinations)
-        if places.empty:
-            logger.warning("No destinations found in selected categories")
-            return jsonify({"error": "No destinations available"}), 404
+        logger.info(f"Places DataFrame: {places}")
 
         # Process amenities
         places = places.apply(lambda x: x.astype(str).str.lower())
@@ -188,10 +204,16 @@ def recommend():
         places["amenities"] = places["amenities"].apply(lambda x: sorted(x))
         places["amenities"] = places["amenities"].apply(lambda x: " ".join(x))
 
+        # Check if amenities are available
+        if places["amenities"].empty:
+            logger.warning("No amenities found for destinations")
+            return jsonify({"error": "No amenities available for destinations"}), 404
+
         # Calculate similarities
         tfidf = TfidfVectorizer()
         place_tfidf = tfidf.fit_transform(places["amenities"])
-        
+        logger.info(f"TF-IDF matrix shape: {place_tfidf.shape}")
+
         # Get personalized recommendations
         recommendations = distribute_destinations(
             destinations_by_category,
